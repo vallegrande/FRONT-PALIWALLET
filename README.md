@@ -1,43 +1,71 @@
-# Svelte + Vite
+# PaliWallet — Interfaz de la dApp (Svelte + Vite)
 
-This template should help get you started developing with Svelte in Vite.
+PaliWallet es la interfaz frontend de una dApp ligera desarrollada con Svelte y Vite. Está pensada como ejemplo/plantilla para conectar una interfaz web con billeteras Web3 (MetaMask u otros proveedores compatibles con `window.ethereum`), mostrar cuentas, consultar balances y enviar transacciones hacia smart contracts.
 
-## Recommended IDE Setup
+**Estado**: demo / plantilla de desarrollo
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+**Principales objetivos:**
+- Proveer una UI simple para interactuar con cuentas Ethereum
+- Demostrar integración básica con proveedores Web3 (conexión, firma y envío de transacciones)
+- Servir como base para integrar smart contracts y construir dApps más completas
 
-## Need an official Svelte framework?
+**Características implementadas (demo)**
+- Conexión a MetaMask / proveedores compatibles
+- Visualización de la cuenta activa y dirección
+- Envío de transacciones sencillas (ej. transferencias de ETH/tokens)
+- Estructura basada en Svelte para fácil extensión
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+**Riesgos y notas**
+- Esta app es una interfaz cliente: las claves privadas las gestiona la wallet del usuario (MetaMask). No se almacenan claves en el repositorio.
+- Úsala solo con redes de prueba mientras desarrollas (Goerli, Sepolia u otras). No envíes fondos reales hasta auditar la integración.
 
-## Technical considerations
+**Fuentes y referencias**
+- Proyectos y documentación de referencia: Uniswap, Aave (estos protocolos ilustran cómo las dApps usan smart contracts en producción).
 
-**Why use this over SvelteKit?**
+**Requisitos**
+- Node.js 16+ (recomendado)
+- npm o yarn
+- Extensión recomendada en VS Code: Svelte for VS Code
 
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
+**Instalación y ejecución local**
+1. Instala dependencias:
 
-This template contains as little as possible to get started with Vite + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `checkJs` in the JS template?**
-
-It is likely that most cases of changing variable types in runtime are likely to be accidental, rather than deliberate. This provides advanced typechecking out of the box. Should you like to take advantage of the dynamically-typed nature of JavaScript, it is trivial to change the configuration.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/sveltejs/svelte-hmr/tree/master/packages/svelte-hmr#preservation-of-local-state).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```js
-// store.js
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+```bash
+npm install
 ```
+
+2. Ejecuta en modo desarrollo (Vite):
+
+```bash
+npm run dev
+```
+
+3. Abre la app en tu navegador en `http://localhost:5173` (Vite) y conecta tu wallet.
+
+**Comandos útiles**
+- `npm run dev` — servidor de desarrollo con HMR
+- `npm run build` — construye la versión de producción
+- `npm run preview` — sirve la build localmente para pruebas
+
+**Estructura del proyecto**
+- `index.html` — página principal
+- `src/main.js` — punto de entrada
+- `src/App.svelte` — componente raíz
+- `src/lib/` — componentes reutilizables (ej. `Counter.svelte` como ejemplo)
+
+**Propuestas de mejora**
+- Integrar soporte para múltiples redes y selección dinámica de RPC
+- Añadir visualización de balances ERC-20 y tokens personalizados
+- Integrar llamadas a smart contracts concretos (contratos de ejemplo para swaps o lending)
+- Añadir pruebas (unitarias / e2e) para flujos críticos
+
+**Contribuir**
+- Haz fork y abre un PR con una descripción clara de los cambios.
+- Incluye instrucciones de testing si agregas funcionalidades.
+
+**Licencia**
+- Repositorio de ejemplo (elige la licencia que prefieras o especifica una).
+
+---
+
+Si quieres, puedo: añadir instrucciones para conectar un smart contract específico, incluir ejemplos de código para llamadas a contratos desde `src/` o agregar capturas/diagrama del flujo. ¿Qué prefieres que integre ahora?
