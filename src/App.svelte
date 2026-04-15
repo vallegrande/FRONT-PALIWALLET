@@ -9,7 +9,11 @@
     getBalanceSafe,
     detectAvailableProviders as detectProviders,
     copyToClipboard,
-    openInExplorer as openAddressInExplorer
+    openInExplorer as openAddressInExplorer,
+    getProviderNetworks,
+    requestAccountSelection,
+    filterAvailableNetworks,
+    logNetworkAddError
   } from "./lib/web3Utils";
 
   // ===== STATE VARIABLES =====
@@ -30,6 +34,40 @@
   let selectedProviderIndex = $state(0);
   let currentEthereumProvider = null;
   let accountsChangedHandler = null;
+
+  // Available networks from wallet (filtered)
+  let availableNetworks = $state(networks);
+
+  // Account selection
+  let availableAccounts = $state([]);
+  let selectedAccountIndex = $state(0);
+
+  // Reactive effect: update provider and balance when selected provider changes
+  $effect(() => {
+    const idx = selectedProviderIndex;
+    if (availableProviders.length > 0 && availableProviders[idx]?.provider) {
+      const newProvider = availableProviders[idx].provider;
+      if (newProvider !== currentEthereumProvider) {
+        currentEthereumProvider = newProvider;
+        // Update the ethers provider if we have an address connected
+        if (address && currentEthereumProvider) {
+          provider = new BrowserProvider(currentEthereumProvider);
+          // Re-attach event listeners
+          if (accountsChangedHandler) {
+            try {
+              currentEthereumProvider.removeListener?.('accountsChanged', accountsChangedHandler);
+            } catch (e) {}
+          }
+          accountsChangedHandler = (accounts) => handleAccountsChanged(accounts);
+          if (typeof currentEthereumProvider.on === 'function') {
+            currentEthereumProvider.on('accountsChanged', accountsChangedHandler);
+          }
+          // Refresh balance with new provider
+          refreshBalance();
+        }
+      }
+    }
+  });
 
   // UI State
   let activeTab = $state('home');
@@ -124,7 +162,8 @@
           error = null;
         } catch (addErr) {
           console.error('Error adding chain:', addErr);
-          error = 'Error agregando la red en la billetera.';
+          const errorDetails = logNetworkAddError(addErr, chainIdKey, params);
+          error = `Error agregando red: ${errorDetails.analysis}`;
         }
       } else {
         console.error('Switch network error:', switchError);
@@ -192,46 +231,55 @@
       // Re-detect providers fresh before connecting
       internalDetectProviders();
 
+      // Identify which provider to use
       const idx = Math.max(0, Math.min(selectedProviderIndex, availableProviders.length - 1));
       const selectedProviderData = availableProviders[idx];
-
+      
       if (!selectedProviderData || !selectedProviderData.provider) {
-        error = 'No se detectó ninguna billetera. Por favor instala MetaMask, Pali Wallet u otra billetera Web3.';
+        error = 'No se detectó ninguna billetera. Por favor instala Pali Wallet u otra billetera Web3.';
         return;
       }
 
       currentEthereumProvider = selectedProviderData.provider;
+      
+      // If it's Pali, we might want to ensure we're using window.pali.ethereum specifically
+      // but currentEthereumProvider already points to the correct raw provider.
 
-      // Verify provider is still available (not locked/disconnected)
-      if (!currentEthereumProvider.request && !currentEthereumProvider.send) {
-        error = 'La billetera no está respondendo. Por favor desbloqueala e intenta de nuevo.';
-        return;
-      }
-
-      // Use EIP-1193 request method directly (more compatible with Pali)
-      let accounts;
-      try {
-        if (typeof currentEthereumProvider.request === 'function') {
-          accounts = await currentEthereumProvider.request({
-            method: 'eth_requestAccounts',
-            params: []
-          });
-        } else if (typeof currentEthereumProvider.send === 'function') {
-          const response = await currentEthereumProvider.send('eth_requestAccounts', []);
-          accounts = response.result || response;
-        } else {
-          throw new Error('Provider no soporta request ni send');
-        }
-      } catch (reqErr) {
-        // Re-lanzar con el código de error para manejo específico
-        throw reqErr;
-      }
-
+      // Use our new helper to request account selection (shows wallet picker)
+      const accounts = await requestAccountSelection(currentEthereumProvider);
+      
       if (accounts && accounts.length > 0) {
+        // Store all accounts the user shared
+        availableAccounts = accounts.map((addr, idx) => ({ 
+          address: addr, 
+          index: idx, 
+          name: `Cuenta ${idx + 1}` 
+        }));
+        
+        // Let the user pick if there are multiple, or default to first
+        selectedAccountIndex = 0;
         address = accounts[0];
         
-        // Crear BrowserProvider después de obtener cuentas
+        // Create BrowserProvider
         provider = new BrowserProvider(currentEthereumProvider);
+        
+        // Get available networks (filtered by provider)
+        const providerNetworks = await getProviderNetworks(currentEthereumProvider);
+        if (providerNetworks && providerNetworks.length > 0) {
+          const chainIds = providerNetworks.map(n => n.chainId);
+          // If we are on Pali, we want to make sure the current network is ALSO included 
+          // even if it's not in the specific pali-recommended list
+          const currentNet = await provider.getNetwork();
+          const allRelevantChainIds = [...new Set([...chainIds, currentNet.chainId.toString()])];
+          availableNetworks = filterAvailableNetworks(allRelevantChainIds, networks);
+        } else {
+          // If wallet doesn't report networks, default to all Syscoin networks if it's Pali
+          if (currentEthereumProvider.isPali || (window.pali && currentEthereumProvider === window.pali.ethereum)) {
+            availableNetworks = filterAvailableNetworks(['57', '5700', '57000', '57042', '57057', '560048'], networks);
+          } else {
+            availableNetworks = networks; // Fallback to all if other wallet
+          }
+        }
         
         const rawBalance = await getBalanceSafe(provider, address);
         balance = formatEther(rawBalance);
@@ -286,25 +334,35 @@
   async function switchAccount() {
     error = null;
     try {
-      if (!currentEthereumProvider && !provider) {
+      if (!currentEthereumProvider) {
         error = 'No hay proveedor Web3 conectado.';
         return;
       }
-      const eth = currentEthereumProvider || provider?.provider;
-      const bProvider = new BrowserProvider(eth);
-      const accounts = await bProvider.send('eth_requestAccounts', []);
-      if (accounts && accounts.length > 0) {
-        address = accounts[0];
-        const bal = await getBalanceSafe(bProvider, address);
-        balance = formatEther(bal);
-        await fetchNetworkInfo();
-        signer = await getSigner();
+      // Refresh provider to avoid stale network/account errors
+      provider = new BrowserProvider(currentEthereumProvider);
+
+      // Use selected account from availableAccounts
+      const selectedAccount = availableAccounts[selectedAccountIndex];
+      if (!selectedAccount) {
+        error = 'Cuenta seleccionada no válida.';
+        return;
       }
+      address = selectedAccount.address;
+      await refreshBalance();
+      signer = await getSigner();
     } catch (err) {
       console.error(err);
       error = err.message || 'Error al cambiar de cuenta.';
     }
   }
+
+  // Reactive effect: switch account when selectedAccountIndex changes
+  $effect(() => {
+    const idx = selectedAccountIndex;
+    if (address && availableAccounts.length > 0 && availableAccounts[idx]?.address !== address) {
+      switchAccount();
+    }
+  });
 
   async function handleAccountsChanged(accounts) {
     if (!accounts || accounts.length === 0) {
@@ -312,13 +370,28 @@
       return;
     }
     address = accounts[0];
+    
+    // Re-create provider to ensure it's fresh for the new account/network
+    if (currentEthereumProvider) {
+      provider = new BrowserProvider(currentEthereumProvider);
+    }
+    
     try {
-      const bal = await getBalanceSafe(provider, address);
-      balance = formatEther(bal);
-      await fetchNetworkInfo();
+      await refreshBalance();
       signer = await getSigner();
     } catch (e) {
       console.error('Error updating on accounts changed:', e);
+    }
+  }
+
+  function handleChainChanged(chainIdHex) {
+    console.log('Network changed:', chainIdHex);
+    // Refresh the full state
+    if (currentEthereumProvider) {
+      provider = new BrowserProvider(currentEthereumProvider);
+      refreshBalance();
+    } else {
+      window.location.reload(); // Hard reset if lost
     }
   }
 
@@ -330,6 +403,7 @@
         accountsChangedHandler = (accounts) => handleAccountsChanged(accounts);
         if (typeof currentEthereumProvider.on === 'function') {
           currentEthereumProvider.on('accountsChanged', accountsChangedHandler);
+          currentEthereumProvider.on('chainChanged', handleChainChanged);
         }
       } catch (e) {
         console.error('Error attaching listeners:', e);
@@ -353,9 +427,10 @@
   });
 
   onDestroy(() => {
-    if (currentEthereumProvider && accountsChangedHandler) {
+    if (currentEthereumProvider) {
       try {
-        currentEthereumProvider.removeListener('accountsChanged', accountsChangedHandler);
+        if (accountsChangedHandler) currentEthereumProvider.removeListener('accountsChanged', accountsChangedHandler);
+        currentEthereumProvider.removeListener('chainChanged', handleChainChanged);
       } catch (e) {
         console.error('Error removing listener on destroy:', e);
       }
@@ -628,7 +703,7 @@
         <div class="relative">
           <div class="w-40 h-40 rounded-2xl gradient-bg p-1">
             <img 
-              src="https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400&h=400&fit=crop&crop=face" 
+              src="/perfil.jpeg" 
               alt="Developer" 
               class="w-full h-full rounded-2xl object-cover"
             />
@@ -669,14 +744,42 @@
       
       {#if !address}
         <div class="text-center py-12">
-          {#if availableProviders.length > 1}
+          {#if availableProviders.length > 0}
             <div class="mb-8 max-w-[400px] mx-auto">
-              <label class="block text-[#a0a0a0] text-sm uppercase tracking-wider font-semibold mb-2">Seleccionar Proveedor de Billetera</label>
-              <select class="w-full px-4 py-3 rounded-xl bg-[#111] text-[#e2e8f0] border border-white/[0.08] font-semibold cursor-pointer transition-all hover:border-[#10b981] focus:outline-none focus:border-[#10b981] focus:shadow-[0_0_12px_rgba(16,185,129,0.2)]" bind:value={selectedProviderIndex}>
-                {#each availableProviders as provider, idx (idx)}
-                  <option value={idx}>{provider.name}</option>
+              <label for="provider-select" class="block text-[#a0a0a0] text-sm uppercase tracking-wider font-semibold mb-3">Proveedor de Billetera Detectado</label>
+              <div class="flex flex-col gap-3">
+                {#each availableProviders as p, idx}
+                  <button 
+                    class="w-full px-6 py-4 rounded-2xl flex items-center justify-between transition-all duration-300 border {selectedProviderIndex === idx ? 'bg-[rgba(0,240,255,0.1)] border-[#00f0ff] shadow-[0_0_30px_rgba(0,240,255,0.2)]' : 'bg-[#111] border-white/[0.08] hover:border-white/20'}"
+                    onclick={() => selectedProviderIndex = idx}
+                  >
+                    <div class="flex items-center gap-4">
+                      <div class="w-10 h-10 rounded-xl gradient-bg flex items-center justify-center shadow-lg">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
+                          <rect x="2" y="5" width="20" height="14" rx="2" />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      </div>
+                      <div class="text-left">
+                        <div class="font-bold text-white text-lg leading-tight">{p.name}</div>
+                        <div class="text-[#666] text-xs uppercase tracking-widest mt-0.5">EIP-1193 Compatible</div>
+                      </div>
+                    </div>
+                    {#if selectedProviderIndex === idx}
+                      <div class="flex items-center gap-2">
+                        <span class="text-[#00f0ff] text-xs font-bold uppercase">Seleccionado</span>
+                        <div class="w-2.5 h-2.5 rounded-full bg-[#00f0ff] animate-pulse"></div>
+                      </div>
+                    {/if}
+                  </button>
                 {/each}
-              </select>
+              </div>
+            </div>
+          {:else}
+            <div class="mb-8 p-6 bg-[rgba(239,68,68,0.05)] border border-[rgba(239,68,68,0.2)] rounded-2xl text-[#f87171]">
+              <p class="font-semibold mb-2">No se detectaron proveedores Web3</p>
+              <p class="text-xs opacity-80">Por favor, instala Pali Wallet para continuar.</p>
+              <button class="mt-4 text-xs underline" onclick={internalDetectProviders}>Re-detectar billeteras</button>
             </div>
           {/if}
           
@@ -722,22 +825,26 @@
                 <div class="flex gap-2">
                   <select class="flex-1 px-3 py-2 rounded-lg bg-[#0a0a0a] border border-white/[0.08] text-white text-sm focus:outline-none focus:border-[#00f0ff]" bind:value={chainId}>
                     <option value="">Seleccionar red...</option>
-                    <option value="1">Ethereum Mainnet</option>
-                    <option value="137">Polygon Mainnet</option>
-                    <option value="56">BSC Mainnet</option>
-                    <option value="10">Optimism</option>
-                    <option value="42161">Arbitrum One</option>
-                    <option value="5700">Rollux</option>
-                    <option value="57">Syscoin NEVM</option>
-                    <option value="57000">Syscoin NEVM Testnet</option>
-                    <option value="5">Goerli Testnet</option>
-                    <option value="11155111">Sepolia Testnet</option>
+                    {#each Object.entries(availableNetworks) as [id, net]}
+                      <option value={id}>{net.name}</option>
+                    {/each}
                   </select>
                   <button class="px-4 py-2 bg-[#00f0ff]/10 border border-[#00f0ff]/30 text-[#00f0ff] rounded-lg text-sm font-semibold transition-all hover:bg-[#00f0ff]/20" onclick={() => { if(chainId) switchNetworkTo(chainId); }}>
                     Cambiar
                   </button>
                 </div>
               </div>
+            </div>
+
+            <!-- Account Selector (Always visible when connected) -->
+            <div class="bg-[#0a0a0a] rounded-xl p-4 border border-white/[0.08] mb-4">
+              <label for="account-select" class="block text-[#a0a0a0] text-xs uppercase tracking-wider font-semibold mb-2">Cuentas Autorizadas</label>
+              <select id="account-select" class="w-full px-3 py-2 rounded-lg bg-[#111] border border-white/[0.08] text-white text-sm focus:outline-none focus:border-[#00f0ff] mb-2" bind:value={selectedAccountIndex}>
+                {#each availableAccounts as account, idx}
+                  <option value={idx}>{account.name} ({account.address.substring(0, 6)}...{account.address.substring(account.address.length - 4)})</option>
+                {/each}
+              </select>
+              <p class="text-[10px] text-[#666] px-1">Si no ves tu otra cuenta, selecciónala primero en Pali Wallet y vuelve a conectar.</p>
             </div>
 
             <div class="bg-[#0a0a0a] rounded-xl p-4 flex items-center justify-between border border-white/[0.08] mb-4">
