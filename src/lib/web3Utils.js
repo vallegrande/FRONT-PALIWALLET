@@ -22,6 +22,31 @@ export function getNetworkInfo(id) {
   return networks[String(id)] || { name: `Chain ${id}`, explorer: null };
 }
 
+const UTXO_NETWORK_IDS = new Set(['57', '5700', '57000', '57042', '57057']);
+
+export function getNetworkFamily(chainId) {
+  return UTXO_NETWORK_IDS.has(String(chainId)) ? 'utxo' : 'evm';
+}
+
+export function filterNetworksByFamily(allNetworks, family) {
+  if (!family || family === 'all') return allNetworks;
+
+  const filtered = {};
+  Object.entries(allNetworks).forEach(([id, net]) => {
+    if (getNetworkFamily(id) === family) {
+      filtered[id] = net;
+    }
+  });
+
+  return Object.keys(filtered).length > 0 ? filtered : allNetworks;
+}
+
+export function getTransactionExplorerUrl(chainId, txHash) {
+  const netInfo = getNetworkInfo(chainId);
+  if (!netInfo.explorer || !txHash) return null;
+  return `${netInfo.explorer}/tx/${txHash}`;
+}
+
 export function getProviderName(ethProvider) {
   if (!ethProvider) return 'No provider';
   try {

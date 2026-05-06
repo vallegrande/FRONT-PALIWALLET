@@ -5,6 +5,9 @@
     networks, 
     networksAdd, 
     getNetworkInfo, 
+    getNetworkFamily,
+    filterNetworksByFamily,
+    getTransactionExplorerUrl,
     getProviderName, 
     getBalanceSafe,
     detectAvailableProviders as detectProviders,
@@ -28,6 +31,9 @@
   let signer = $state(null);
   let copied = $state(false);
   let networkLoading = $state(false);
+  let selectedNetworkId = $state('');
+  let selectedNetworkFamily = $state('utxo');
+  let balancePollingTimer = null;
 
   // Multi-provider support
   let availableProviders = $state([]);
@@ -123,6 +129,8 @@
     try {
       const network = await provider.getNetwork();
       chainId = network.chainId.toString();
+      selectedNetworkId = chainId;
+      selectedNetworkFamily = getNetworkFamily(chainId);
       const netInfo = getNetworkInfo(chainId);
       chainName = netInfo.name;
       const block = await provider.getBlockNumber();
@@ -143,12 +151,28 @@
     }
   }
 
+  function stopBalancePolling() {
+    if (balancePollingTimer) {
+      clearInterval(balancePollingTimer);
+      balancePollingTimer = null;
+    }
+  }
+
+  function startBalancePolling() {
+    stopBalancePolling();
+    if (!address || !provider) return;
+    balancePollingTimer = setInterval(() => {
+      refreshBalance();
+    }, 10000);
+  }
+
   async function switchNetworkTo(chainIdKey) {
     if (!currentEthereumProvider) { error = 'No hay proveedor conectado para cambiar la red.'; return; }
     const params = networksAdd[String(chainIdKey)];
     if (!params) { error = 'Red no soportada para cambio automático.'; return; }
     try {
       await currentEthereumProvider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: params.chainIdHex }] });
+      selectedNetworkId = String(chainIdKey);
       provider = new BrowserProvider(currentEthereumProvider);
       await fetchNetworkInfo();
       error = null;
@@ -157,6 +181,7 @@
       if (switchError?.code === 4902 || msg.toLowerCase().includes('4902') || msg.toLowerCase().includes('not found')) {
         try {
           await currentEthereumProvider.request({ method: 'wallet_addEthereumChain', params: [{ chainId: params.chainIdHex, chainName: params.chainName, rpcUrls: params.rpcUrls, nativeCurrency: params.nativeCurrency, blockExplorerUrls: params.blockExplorerUrls }] });
+          selectedNetworkId = String(chainIdKey);
           provider = new BrowserProvider(currentEthereumProvider);
           await fetchNetworkInfo();
           error = null;
@@ -187,8 +212,10 @@
         const value = parseEther(String(sendAmount));
         tx = await signer.sendTransaction({ to: toAddress, value });
       }
+      await tx.wait();
       txHash = tx.hash;
-      txList = [{ hash: txHash, to: tx.to, value: sendAmount || '0', network: chainId }, ...txList];
+      txList = [{ hash: txHash, to: tx.to, value: sendAmount || '0', network: chainId, explorerUrl: getTransactionExplorerUrl(chainId, txHash) }, ...txList];
+      await refreshBalance();
     } catch (err) {
       console.error('Error sending tx:', err);
       error = err?.message || 'Error enviando la transacción.';
@@ -272,12 +299,16 @@
           const currentNet = await provider.getNetwork();
           const allRelevantChainIds = [...new Set([...chainIds, currentNet.chainId.toString()])];
           availableNetworks = filterAvailableNetworks(allRelevantChainIds, networks);
+          selectedNetworkId = currentNet.chainId.toString();
+          selectedNetworkFamily = getNetworkFamily(selectedNetworkId);
         } else {
           // If wallet doesn't report networks, default to all Syscoin networks if it's Pali
           if (currentEthereumProvider.isPali || (window.pali && currentEthereumProvider === window.pali.ethereum)) {
             availableNetworks = filterAvailableNetworks(['57', '5700', '57000', '57042', '57057', '560048'], networks);
+            selectedNetworkFamily = 'utxo';
           } else {
             availableNetworks = networks; // Fallback to all if other wallet
+            selectedNetworkFamily = 'evm';
           }
         }
         
@@ -285,6 +316,7 @@
         balance = formatEther(rawBalance);
         await fetchNetworkInfo();
         signer = await getSigner();
+        startBalancePolling();
 
         // Attach event listeners after successful connection
         if (typeof currentEthereumProvider.on === 'function') {
@@ -329,6 +361,7 @@
     isConnecting = false;
     provider = null;
     currentEthereumProvider = null;
+    stopBalancePolling();
   }
 
   async function switchAccount() {
@@ -386,10 +419,12 @@
 
   function handleChainChanged(chainIdHex) {
     console.log('Network changed:', chainIdHex);
+    selectedNetworkId = String(parseInt(chainIdHex, 16));
     // Refresh the full state
     if (currentEthereumProvider) {
       provider = new BrowserProvider(currentEthereumProvider);
       refreshBalance();
+      startBalancePolling();
     } else {
       window.location.reload(); // Hard reset if lost
     }
@@ -427,6 +462,7 @@
   });
 
   onDestroy(() => {
+    stopBalancePolling();
     if (currentEthereumProvider) {
       try {
         if (accountsChangedHandler) currentEthereumProvider.removeListener('accountsChanged', accountsChangedHandler);
@@ -821,15 +857,24 @@
               
               <!-- Network Switcher -->
               <div class="pt-4 border-t border-[rgba(0,240,255,0.1)]">
-                <label class="block text-[#a0a0a0] text-xs uppercase tracking-wider font-semibold mb-2">Cambiar Red</label>
+                <label class="block text-[#a0a0a0] text-xs uppercase tracking-wider font-semibold mb-2">Cambiar Red por Proveedor</label>
+                <div class="flex flex-wrap gap-2 mb-3">
+                  <button class="px-3 py-2 rounded-lg text-xs font-semibold border transition-all {selectedNetworkFamily === 'utxo' ? 'bg-[rgba(0,240,255,0.12)] border-[#00f0ff] text-[#00f0ff]' : 'bg-[#0a0a0a] border-white/[0.08] text-[#a0a0a0]'}" onclick={() => { selectedNetworkFamily = 'utxo'; selectedNetworkId = Object.keys(filterNetworksByFamily(availableNetworks, 'utxo'))[0] || selectedNetworkId; }}>
+                    Syscoin / zkSYS / PoB
+                  </button>
+                  <button class="px-3 py-2 rounded-lg text-xs font-semibold border transition-all {selectedNetworkFamily === 'evm' ? 'bg-[rgba(0,240,255,0.12)] border-[#00f0ff] text-[#00f0ff]' : 'bg-[#0a0a0a] border-white/[0.08] text-[#a0a0a0]'}" onclick={() => { selectedNetworkFamily = 'evm'; selectedNetworkId = Object.keys(filterNetworksByFamily(availableNetworks, 'evm'))[0] || selectedNetworkId; }}>
+                    EVM Networks
+                  </button>
+                </div>
+                <p class="text-[11px] text-[#666] mb-3">zkSYS PoB Devnet y zkSYS Testnet están agrupadas aquí junto con Syscoin NEVM y Rollux.</p>
                 <div class="flex gap-2">
-                  <select class="flex-1 px-3 py-2 rounded-lg bg-[#0a0a0a] border border-white/[0.08] text-white text-sm focus:outline-none focus:border-[#00f0ff]" bind:value={chainId}>
+                  <select class="flex-1 px-3 py-2 rounded-lg bg-[#0a0a0a] border border-white/[0.08] text-white text-sm focus:outline-none focus:border-[#00f0ff]" bind:value={selectedNetworkId}>
                     <option value="">Seleccionar red...</option>
-                    {#each Object.entries(availableNetworks) as [id, net]}
+                    {#each Object.entries(filterNetworksByFamily(availableNetworks, selectedNetworkFamily)) as [id, net]}
                       <option value={id}>{net.name}</option>
                     {/each}
                   </select>
-                  <button class="px-4 py-2 bg-[#00f0ff]/10 border border-[#00f0ff]/30 text-[#00f0ff] rounded-lg text-sm font-semibold transition-all hover:bg-[#00f0ff]/20" onclick={() => { if(chainId) switchNetworkTo(chainId); }}>
+                  <button class="px-4 py-2 bg-[#00f0ff]/10 border border-[#00f0ff]/30 text-[#00f0ff] rounded-lg text-sm font-semibold transition-all hover:bg-[#00f0ff]/20" onclick={() => { if(selectedNetworkId) switchNetworkTo(selectedNetworkId); }}>
                     Cambiar
                   </button>
                 </div>
@@ -881,6 +926,38 @@
                 Enviar Transacción
               {/if}
             </button>
+
+            {#if txHash}
+              <div class="mt-5 rounded-2xl border border-[rgba(0,240,255,0.18)] bg-[rgba(0,240,255,0.05)] p-4">
+                <div class="text-[11px] uppercase tracking-[0.25em] text-[#a0a0a0] mb-2">Hash de transacción</div>
+                <div class="break-all text-sm text-white mb-3">{txHash}</div>
+                <div class="flex flex-wrap gap-3">
+                  {#if getTransactionExplorerUrl(chainId, txHash)}
+                    <a class="px-4 py-2 rounded-lg bg-[#00f0ff] text-black text-sm font-semibold transition-all hover:opacity-90" href={getTransactionExplorerUrl(chainId, txHash)} target="_blank" rel="noopener noreferrer">
+                      Ver detalle
+                    </a>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
+            {#if txList.length > 0}
+              <div class="mt-5 space-y-3">
+                <div class="text-[11px] uppercase tracking-[0.25em] text-[#a0a0a0]">Últimas transacciones</div>
+                {#each txList as tx}
+                  <div class="rounded-2xl border border-white/[0.08] bg-[#0a0a0a] p-4">
+                    <div class="flex items-center justify-between gap-3 mb-2">
+                      <span class="text-sm text-white font-medium">{tx.value} ETH</span>
+                      <span class="text-[11px] uppercase tracking-wider text-[#00f0ff]">{tx.network}</span>
+                    </div>
+                    <div class="text-xs text-[#a0a0a0] break-all mb-2">{tx.hash}</div>
+                    {#if tx.explorerUrl}
+                      <a class="text-sm text-[#00f0ff] hover:underline" href={tx.explorerUrl} target="_blank" rel="noopener noreferrer">Abrir en explorador</a>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
           </div>
         </div>
       {/if}
